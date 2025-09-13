@@ -1,7 +1,5 @@
 const aedes = require('aedes')();
 const server = require('net').createServer(aedes.handle);
-const http = require('http').createServer();
-const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const express = require('express');
 const app = express();
@@ -28,9 +26,17 @@ const validateHotelId = (req, res, next) => {
 };
 
 // Database connection check middleware
-const checkDatabaseConnection = (req, res, next) => {
+const checkDatabaseConnection = async (req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
-    return res.status(503).json({ error: 'Database not connected' });
+    try {
+      await mongoose.connect(process.env.MONGO_URL, {
+        serverSelectionTimeoutMS: 5000, // Timeout after 5s
+      });
+      console.log('Connected to MongoDB');
+    } catch (err) {
+      console.error('MongoDB connection error:', err);
+      return res.status(503).json({ error: 'Database not connected' });
+    }
   }
   next();
 };
@@ -38,14 +44,23 @@ const checkDatabaseConnection = (req, res, next) => {
 // Apply middleware to all API routes
 app.use('/api', checkDatabaseConnection);
 
-// MongoDB Connection
-const mongoUrl = process.env.MONGO_URL;
-mongoose.connect(mongoUrl)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => {
+// MongoDB Connection (Singleton Pattern)
+let mongooseConnection = null;
+async function connectToMongo() {
+  if (mongooseConnection && mongoose.connection.readyState === 1) {
+    return mongooseConnection;
+  }
+  try {
+    mongooseConnection = await mongoose.connect(process.env.MONGO_URL, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    console.log('MongoDB connected');
+    return mongooseConnection;
+  } catch (err) {
     console.error('MongoDB connection error:', err);
-    console.log('Please make sure MongoDB is running or update MONGO_URL in .env file');
-  });
+    throw err;
+  }
+}
 
 // Schemas
 const hotelSchema = new mongoose.Schema({
@@ -384,9 +399,12 @@ function getRoomCountForHotel(hotelId) {
   return roomCounts[hotelId] || 20;
 }
 
-mongoose.connection.once('open', () => {
+// Initialize data after MongoDB connection
+connectToMongo().then(() => {
   initializeHotels();
   initializeRooms();
+}).catch(err => {
+  console.error('Failed to initialize data:', err);
 });
 
 // MQTT Broker - Only enable in local/dev (not on Vercel/serverless)
@@ -447,7 +465,6 @@ if (process.env.NODE_ENV !== 'production') {
             fullUpdate,
             { upsert: true, new: true }
           );
-          broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
 
           // Create activity
           const activityType = data.check_in ? 'checkin' : 'checkout';
@@ -495,8 +512,7 @@ if (process.env.NODE_ENV !== 'production') {
         }
 
         if (newActivity) {
-          const savedActivity = await new Activity(newActivity).save();
-          broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
+          await new Activity(newActivity).save();
         }
       } catch (err) {
         console.error('Error processing MQTT message:', err);
@@ -622,53 +638,5 @@ app.get('/api/activity/:hotelId', validateHotelId, async (req, res) => {
   }
 });
 
-// Mount Express app on HTTP server
-http.on('request', app);
-
-// WebSocket server for real-time updates
-const wss = new WebSocket.Server({ server: http });
-
-wss.on('connection', (ws) => {
-  console.log('WebSocket client connected');
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      console.log('Received WebSocket message:', data);
-    } catch (error) {
-      console.error('Error parsing WebSocket message:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
-  });
-
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-  });
-});
-
-// Function to broadcast to all WebSocket clients
-function broadcastToClients(event, data) {
-  const message = JSON.stringify({ event, data });
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
-}
-
-// Vercel serverless handler (required for Vercel deployment)
-if (typeof process !== 'undefined' && process.env.VERCEL) {
-  const handler = http.createServer(app);
-  module.exports = handler;
-} else {
-  // Start HTTP/WebSocket Server (local/dev)
-  const httpPort = process.env.HTTP_PORT || 3000;
-  http.listen(httpPort, () => {
-    console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
-    console.log(`API endpoints available at http://localhost:${httpPort}/api`);
-    console.log(`WebSocket server available at ws://localhost:${httpPort}`);
-  });
-}
+// Vercel serverless export
+module.exports = app;

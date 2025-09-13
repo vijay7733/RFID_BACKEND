@@ -7,9 +7,15 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
+// Load environment variables
+require('dotenv').config();
+
+// Parse CORS origins from environment variable
+const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000', 'http://localhost:3001'];
+
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  origin: corsOrigins,
   credentials: true
 }));
 app.use(express.json());
@@ -40,16 +46,13 @@ const checkDatabaseConnection = (req, res, next) => {
 // Apply middleware to all API routes
 app.use('/api', checkDatabaseConnection);
 
-// Environment Variables
-require('dotenv').config();
-
 // MongoDB Connection
-const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017/hotel_db';
+const mongoUrl = process.env.MONGO_URL ;
 mongoose.connect(mongoUrl)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => {
     console.error('MongoDB connection error:', err);
-    console.log('Please make sure MongoDB is running locally or update MONGO_URL in .env file');
+    console.log('Please make sure MongoDB is running or update MONGO_URL in .env file');
   });
 
 // Schemas
@@ -151,7 +154,7 @@ const User = mongoose.model('User', userSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Activity = mongoose.model('Activity', activitySchema);
 
-// Initialize Hotel Data (Run this once to populate the database)
+// Initialize Hotel Data
 async function initializeHotels() {
   const hotels = [
     {
@@ -323,7 +326,7 @@ async function initializeRooms() {
     const roomCount = getRoomCountForHotel(hotelId);
     
     // Generate realistic room numbers: 101-115 for floor 1, 201-215 for floor 2
-    const roomsPerFloor = Math.ceil(roomCount / 2); // Split rooms between 2 floors
+    const roomsPerFloor = Math.ceil(roomCount / 2);
     let roomId = 1;
     
     // Floor 1: 101-115

@@ -1,33 +1,22 @@
 const aedes = require('aedes')();
 const server = require('net').createServer(aedes.handle);
+const http = require('http').createServer();
+const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const express = require('express');
-const cors = require('cors');
 const app = express();
 
 // Load environment variables
 require('dotenv').config();
 
-// CORS configuration
-const corsOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(',')
-  : ['https://rfid-frontend-vert.vercel.app', 'http://localhost:3000'];
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || corsOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-
 // Middleware
 app.use(express.json());
-
+const cors = require('cors');
+const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000', 'http://localhost:3001'];
+app.use(cors({
+  origin: corsOrigins,
+  credentials: true
+}));
 // Request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -44,17 +33,9 @@ const validateHotelId = (req, res, next) => {
 };
 
 // Database connection check middleware
-const checkDatabaseConnection = async (req, res, next) => {
+const checkDatabaseConnection = (req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
-    try {
-      await mongoose.connect(process.env.MONGO_URL, {
-        serverSelectionTimeoutMS: 10000, // Increased to 10s for reliability
-      });
-      console.log('Connected to MongoDB with database:', process.env.MONGO_URL.split('/').pop().split('?')[0]); // Logs the database name
-    } catch (err) {
-      console.error('MongoDB connection error:', err);
-      return res.status(503).json({ error: 'Database not connected' });
-    }
+    return res.status(503).json({ error: 'Database not connected' });
   }
   next();
 };
@@ -62,25 +43,16 @@ const checkDatabaseConnection = async (req, res, next) => {
 // Apply middleware to all API routes
 app.use('/api', checkDatabaseConnection);
 
-// MongoDB Connection (Singleton Pattern)
-let mongooseConnection = null;
-async function connectToMongo() {
-  if (mongooseConnection && mongoose.connection.readyState === 1) {
-    return mongooseConnection;
-  }
-  try {
-    mongooseConnection = await mongoose.connect(process.env.MONGO_URL, {
-      serverSelectionTimeoutMS: 10000,
-    });
-    console.log('MongoDB connected with database:', process.env.MONGO_URL.split('/').pop().split('?')[0]);
-    return mongooseConnection;
-  } catch (err) {
+// MongoDB Connection
+const mongoUrl = process.env.MONGO_URL;
+mongoose.connect(mongoUrl)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => {
     console.error('MongoDB connection error:', err);
-    throw err;
-  }
-}
+    console.log('Please make sure MongoDB is running or update MONGO_URL in .env file');
+  });
 
-// Schemas (Collections will be created based on model names)
+// Schemas
 const hotelSchema = new mongoose.Schema({
   id: String,
   name: String,
@@ -339,7 +311,7 @@ async function initializeHotels() {
   for (const hotel of hotels) {
     await Hotel.findOneAndUpdate({ id: hotel.id }, hotel, { upsert: true });
   }
-  console.log("Hotels initialized in database:", process.env.MONGO_URL.split('/').pop().split('?')[0]);
+  console.log("Hotels initialized");
 }
 
 // Initialize Room Data for all hotels
@@ -399,7 +371,7 @@ async function initializeRooms() {
       }
     }
   }
-  console.log("Rooms initialized in database:", process.env.MONGO_URL.split('/').pop().split('?')[0]);
+  console.log("Rooms initialized for all hotels");
 }
 
 // Get room count for each hotel
@@ -417,12 +389,9 @@ function getRoomCountForHotel(hotelId) {
   return roomCounts[hotelId] || 20;
 }
 
-// Initialize data after MongoDB connection
-connectToMongo().then(() => {
+mongoose.connection.once('open', () => {
   initializeHotels();
   initializeRooms();
-}).catch(err => {
-  console.error('Failed to initialize data:', err);
 });
 
 // MQTT Broker - Only enable in local/dev (not on Vercel/serverless)
@@ -478,11 +447,12 @@ if (process.env.NODE_ENV !== 'production') {
             }
           }
           const fullUpdate = { ...update, ...hasMasterKeyUpdate };
-          await Room.findOneAndUpdate(
+          const updatedRoom = await Room.findOneAndUpdate(
             { hotelId: data.hotelId, number: roomNum },
             fullUpdate,
             { upsert: true, new: true }
           );
+          broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
 
           // Create activity
           const activityType = data.check_in ? 'checkin' : 'checkout';
@@ -530,7 +500,8 @@ if (process.env.NODE_ENV !== 'production') {
         }
 
         if (newActivity) {
-          await new Activity(newActivity).save();
+          const savedActivity = await new Activity(newActivity).save();
+          broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
         }
       } catch (err) {
         console.error('Error processing MQTT message:', err);
@@ -656,5 +627,53 @@ app.get('/api/activity/:hotelId', validateHotelId, async (req, res) => {
   }
 });
 
-// Vercel serverless export
-module.exports = app;
+// Mount Express app on HTTP server
+http.on('request', app);
+
+// WebSocket server for real-time updates
+const wss = new WebSocket.Server({ server: http });
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      console.log('Received WebSocket message:', data);
+    } catch (error) {
+      console.error('Error parsing WebSocket message:', error);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
+
+// Function to broadcast to all WebSocket clients
+function broadcastToClients(event, data) {
+  const message = JSON.stringify({ event, data });
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// Vercel serverless handler (required for Vercel deployment)
+if (typeof process !== 'undefined' && process.env.VERCEL) {
+  const handler = http.createServer(app);
+  module.exports = handler;
+} else {
+  // Start HTTP/WebSocket Server (local/dev)
+  const httpPort = process.env.HTTP_PORT || 3000;
+  http.listen(httpPort, () => {
+    console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
+    console.log(`API endpoints available at http://localhost:${httpPort}/api`);
+    console.log(`WebSocket server available at ws://localhost:${httpPort}`);
+  });
+}

@@ -4,20 +4,12 @@ const http = require('http').createServer();
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const express = require('express');
-const cors = require('cors');
 const app = express();
 
 // Load environment variables
 require('dotenv').config();
 
-// Parse CORS origins from environment variable
-const corsOrigins = process.env.CORS_ORIGIN ;
-
 // Middleware
-app.use(cors({
-  origin: corsOrigins,
-  credentials: true
-}));
 app.use(express.json());
 
 // Request logging middleware
@@ -47,7 +39,7 @@ const checkDatabaseConnection = (req, res, next) => {
 app.use('/api', checkDatabaseConnection);
 
 // MongoDB Connection
-const mongoUrl = process.env.MONGO_URL ;
+const mongoUrl = process.env.MONGO_URL;
 mongoose.connect(mongoUrl)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => {
@@ -397,119 +389,121 @@ mongoose.connection.once('open', () => {
   initializeRooms();
 });
 
-// MQTT Broker
-const mqttPort = process.env.MQTT_PORT || 1883;
-server.listen(mqttPort, () => {
-  console.log(`MQTT broker listening on port ${mqttPort}`);
-});
+// MQTT Broker - Only enable in local/dev (not on Vercel/serverless)
+if (process.env.NODE_ENV !== 'production') {
+  const mqttPort = process.env.MQTT_PORT || 1883;
+  server.listen(mqttPort, () => {
+    console.log(`MQTT broker listening on port ${mqttPort}`);
+  });
 
-// Handle MQTT publishes from ESP32
-aedes.on('publish', async (packet, client) => {
-  if (packet.topic.startsWith('campus/room/')) {
-    try {
-      const data = JSON.parse(packet.payload.toString());
-      const [, , building, floor, roomNum, type] = packet.topic.split('/');
-      
-      // Validate MQTT data
-      if (!floor || !roomNum || !type) {
-        console.error('Invalid MQTT topic format:', packet.topic);
-        return;
-      }
-      
-      data.room = roomNum;
-      data.hotelId = floor; // Map floor to hotelId
-
-      let newActivity = null;
-
-      if (type === 'attendance') {
-        await new Attendance(data).save();
-        console.log(`Saved attendance for room ${roomNum} in hotel ${data.hotelId}:`, data);
-
-        // Update room status
-        let update = {};
-        let hasMasterKeyUpdate = {};
-        if (data.check_in) {
-          const status = data.role === 'Maintenance' ? 'maintenance' : 'occupied';
-          update = {
-            status,
-            occupantType: data.role.toLowerCase(),
-            powerStatus: 'on',
-          };
-          if (data.role === 'Manager') {
-            hasMasterKeyUpdate = { hasMasterKey: true };
-          }
-        } else {
-          update = {
-            status: 'vacant',
-            occupantType: null,
-            powerStatus: 'off',
-          };
-          if (data.role === 'Manager') {
-            hasMasterKeyUpdate = { hasMasterKey: false };
-          }
+  // Handle MQTT publishes from ESP32
+  aedes.on('publish', async (packet, client) => {
+    if (packet.topic.startsWith('campus/room/')) {
+      try {
+        const data = JSON.parse(packet.payload.toString());
+        const [, , building, floor, roomNum, type] = packet.topic.split('/');
+        
+        // Validate MQTT data
+        if (!floor || !roomNum || !type) {
+          console.error('Invalid MQTT topic format:', packet.topic);
+          return;
         }
-        const fullUpdate = { ...update, ...hasMasterKeyUpdate };
-        const updatedRoom = await Room.findOneAndUpdate(
-          { hotelId: data.hotelId, number: roomNum },
-          fullUpdate,
-          { upsert: true, new: true }
-        );
-        broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
+        
+        data.room = roomNum;
+        data.hotelId = floor; // Map floor to hotelId
 
-        // Create activity
-        const activityType = data.check_in ? 'checkin' : 'checkout';
-        const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
-        const time = data.check_in || data.check_out;
-        newActivity = {
-          hotelId: data.hotelId,
-          id: new Date().getTime().toString(),
-          type: activityType,
-          action,
-          user: data.role,
-          time,
-        };
-      } else if (type === 'alerts') {
-        await new Alert(data).save();
-        console.log(`Saved alert for room ${roomNum} in hotel ${data.hotelId}:`, data);
+        let newActivity = null;
 
-        // Create activity
-        const activityType = 'security';
-        const action = `Alert: ${data.alert_message} for ${data.role} in Room ${data.room}`;
-        const time = data.triggered_at;
-        newActivity = {
-          hotelId: data.hotelId,
-          id: new Date().getTime().toString(),
-          type: activityType,
-          action,
-          user: 'System',
-          time,
-        };
-      } else if (type === 'denied_access') {
-        await new Denied(data).save();
-        console.log(`Saved denied access for room ${roomNum} in hotel ${data.hotelId}:`, data);
+        if (type === 'attendance') {
+          await new Attendance(data).save();
+          console.log(`Saved attendance for room ${roomNum} in hotel ${data.hotelId}:`, data);
 
-        // Create activity
-        const action = `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`;
-        const time = data.attempted_at;
-        newActivity = {
-          hotelId: data.hotelId,
-          id: new Date().getTime().toString(),
-          type: 'security',
-          action,
-          user: data.role,
-          time,
-        };
+          // Update room status
+          let update = {};
+          let hasMasterKeyUpdate = {};
+          if (data.check_in) {
+            const status = data.role === 'Maintenance' ? 'maintenance' : 'occupied';
+            update = {
+              status,
+              occupantType: data.role.toLowerCase(),
+              powerStatus: 'on',
+            };
+            if (data.role === 'Manager') {
+              hasMasterKeyUpdate = { hasMasterKey: true };
+            }
+          } else {
+            update = {
+              status: 'vacant',
+              occupantType: null,
+              powerStatus: 'off',
+            };
+            if (data.role === 'Manager') {
+              hasMasterKeyUpdate = { hasMasterKey: false };
+            }
+          }
+          const fullUpdate = { ...update, ...hasMasterKeyUpdate };
+          const updatedRoom = await Room.findOneAndUpdate(
+            { hotelId: data.hotelId, number: roomNum },
+            fullUpdate,
+            { upsert: true, new: true }
+          );
+          broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
+
+          // Create activity
+          const activityType = data.check_in ? 'checkin' : 'checkout';
+          const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
+          const time = data.check_in || data.check_out;
+          newActivity = {
+            hotelId: data.hotelId,
+            id: new Date().getTime().toString(),
+            type: activityType,
+            action,
+            user: data.role,
+            time,
+          };
+        } else if (type === 'alerts') {
+          await new Alert(data).save();
+          console.log(`Saved alert for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+          // Create activity
+          const activityType = 'security';
+          const action = `Alert: ${data.alert_message} for ${data.role} in Room ${data.room}`;
+          const time = data.triggered_at;
+          newActivity = {
+            hotelId: data.hotelId,
+            id: new Date().getTime().toString(),
+            type: activityType,
+            action,
+            user: 'System',
+            time,
+          };
+        } else if (type === 'denied_access') {
+          await new Denied(data).save();
+          console.log(`Saved denied access for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+          // Create activity
+          const action = `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`;
+          const time = data.attempted_at;
+          newActivity = {
+            hotelId: data.hotelId,
+            id: new Date().getTime().toString(),
+            type: 'security',
+            action,
+            user: data.role,
+            time,
+          };
+        }
+
+        if (newActivity) {
+          const savedActivity = await new Activity(newActivity).save();
+          broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
+        }
+      } catch (err) {
+        console.error('Error processing MQTT message:', err);
       }
-
-      if (newActivity) {
-        const savedActivity = await new Activity(newActivity).save();
-        broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
-      }
-    } catch (err) {
-      console.error('Error processing MQTT message:', err);
     }
-  }
-});
+  });
+}
 
 // HTTP API Endpoints for Frontend
 app.get('/api/hotel/:hotelId', validateHotelId, async (req, res) => {
@@ -665,10 +659,16 @@ function broadcastToClients(event, data) {
   });
 }
 
-// Start HTTP/WebSocket Server
-const httpPort = process.env.HTTP_PORT || 3000;
-http.listen(httpPort, () => {
-  console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
-  console.log(`API endpoints available at http://localhost:${httpPort}/api`);
-  console.log(`WebSocket server available at ws://localhost:${httpPort}`);
-});
+// Vercel serverless handler (required for Vercel deployment)
+if (typeof process !== 'undefined' && process.env.VERCEL) {
+  const handler = http.createServer(app);
+  module.exports = handler;
+} else {
+  // Start HTTP/WebSocket Server (local/dev)
+  const httpPort = process.env.HTTP_PORT || 3000;
+  http.listen(httpPort, () => {
+    console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
+    console.log(`API endpoints available at http://localhost:${httpPort}/api`);
+    console.log(`WebSocket server available at ws://localhost:${httpPort}`);
+  });
+}

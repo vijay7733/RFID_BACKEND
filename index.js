@@ -2,10 +2,28 @@ const aedes = require('aedes')();
 const server = require('net').createServer(aedes.handle);
 const mongoose = require('mongoose');
 const express = require('express');
+const cors = require('cors');
 const app = express();
 
 // Load environment variables
 require('dotenv').config();
+
+// CORS configuration
+const corsOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',')
+  : ['https://rfid-frontend-vert.vercel.app', 'http://localhost:3000'];
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || corsOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
 // Middleware
 app.use(express.json());
@@ -30,9 +48,9 @@ const checkDatabaseConnection = async (req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
     try {
       await mongoose.connect(process.env.MONGO_URL, {
-        serverSelectionTimeoutMS: 5000, // Timeout after 5s
+        serverSelectionTimeoutMS: 10000, // Increased to 10s for reliability
       });
-      console.log('Connected to MongoDB');
+      console.log('Connected to MongoDB with database:', process.env.MONGO_URL.split('/').pop().split('?')[0]); // Logs the database name
     } catch (err) {
       console.error('MongoDB connection error:', err);
       return res.status(503).json({ error: 'Database not connected' });
@@ -52,9 +70,9 @@ async function connectToMongo() {
   }
   try {
     mongooseConnection = await mongoose.connect(process.env.MONGO_URL, {
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10000,
     });
-    console.log('MongoDB connected');
+    console.log('MongoDB connected with database:', process.env.MONGO_URL.split('/').pop().split('?')[0]);
     return mongooseConnection;
   } catch (err) {
     console.error('MongoDB connection error:', err);
@@ -62,7 +80,7 @@ async function connectToMongo() {
   }
 }
 
-// Schemas
+// Schemas (Collections will be created based on model names)
 const hotelSchema = new mongoose.Schema({
   id: String,
   name: String,
@@ -321,7 +339,7 @@ async function initializeHotels() {
   for (const hotel of hotels) {
     await Hotel.findOneAndUpdate({ id: hotel.id }, hotel, { upsert: true });
   }
-  console.log("Hotels initialized");
+  console.log("Hotels initialized in database:", process.env.MONGO_URL.split('/').pop().split('?')[0]);
 }
 
 // Initialize Room Data for all hotels
@@ -381,7 +399,7 @@ async function initializeRooms() {
       }
     }
   }
-  console.log("Rooms initialized for all hotels");
+  console.log("Rooms initialized in database:", process.env.MONGO_URL.split('/').pop().split('?')[0]);
 }
 
 // Get room count for each hotel
@@ -460,7 +478,7 @@ if (process.env.NODE_ENV !== 'production') {
             }
           }
           const fullUpdate = { ...update, ...hasMasterKeyUpdate };
-          const updatedRoom = await Room.findOneAndUpdate(
+          await Room.findOneAndUpdate(
             { hotelId: data.hotelId, number: roomNum },
             fullUpdate,
             { upsert: true, new: true }

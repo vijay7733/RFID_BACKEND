@@ -1,0 +1,671 @@
+const aedes = require('aedes')();
+const server = require('net').createServer(aedes.handle);
+const http = require('http').createServer();
+const WebSocket = require('ws');
+const mongoose = require('mongoose');
+const express = require('express');
+const cors = require('cors');
+const app = express();
+
+// Middleware
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  credentials: true
+}));
+app.use(express.json());
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Input validation middleware
+const validateHotelId = (req, res, next) => {
+  const hotelId = req.params.hotelId;
+  if (!hotelId || !/^[1-8]$/.test(hotelId)) {
+    return res.status(400).json({ error: 'Invalid hotel ID. Must be 1-8' });
+  }
+  next();
+};
+
+// Database connection check middleware
+const checkDatabaseConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'Database not connected' });
+  }
+  next();
+};
+
+// Apply middleware to all API routes
+app.use('/api', checkDatabaseConnection);
+
+// Environment Variables
+require('dotenv').config();
+
+// MongoDB Connection
+const mongoUrl = process.env.MONGO_URL || 'mongodb://localhost:27017/hotel_db';
+mongoose.connect(mongoUrl)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => {
+    console.error('MongoDB connection error:', err);
+    console.log('Please make sure MongoDB is running locally or update MONGO_URL in .env file');
+  });
+
+// Schemas
+const hotelSchema = new mongoose.Schema({
+  id: String,
+  name: String,
+  location: String,
+  address: String,
+  phone: String,
+  email: String,
+  rating: Number,
+  description: String,
+  image: String,
+  status: String,
+  lastActivity: String,
+  manager: {
+    name: String,
+    phone: String,
+    email: String,
+    status: String,
+  },
+}, { timestamps: true });
+
+const roomSchema = new mongoose.Schema({
+  hotelId: String,
+  id: Number,
+  number: String,
+  status: String,
+  hasMasterKey: Boolean,
+  hasLowPower: Boolean,
+  powerStatus: String,
+  occupantType: String,
+}, { timestamps: true });
+
+const attendanceSchema = new mongoose.Schema({
+  hotelId: String,
+  card_uid: String,
+  role: String,
+  check_in: String,
+  check_out: String,
+  duration: Number,
+  room: String,
+}, { timestamps: true });
+
+const alertSchema = new mongoose.Schema({
+  hotelId: String,
+  card_uid: String,
+  role: String,
+  alert_message: String,
+  triggered_at: String,
+  room: String,
+}, { timestamps: true });
+
+const deniedSchema = new mongoose.Schema({
+  hotelId: String,
+  card_uid: String,
+  role: String,
+  denial_reason: String,
+  attempted_at: String,
+  room: String,
+}, { timestamps: true });
+
+const userSchema = new mongoose.Schema({
+  hotelId: String,
+  id: String,
+  name: String,
+  email: String,
+  role: String,
+  status: String,
+  lastLogin: String,
+  avatar: String,
+}, { timestamps: true });
+
+const cardSchema = new mongoose.Schema({
+  hotelId: String,
+  id: String,
+  roomNumber: String,
+  guestName: String,
+  status: String,
+  expiryDate: String,
+  lastUsed: String,
+}, { timestamps: true });
+
+const activitySchema = new mongoose.Schema({
+  hotelId: String,
+  id: String,
+  type: String,
+  action: String,
+  user: String,
+  time: String,
+}, { timestamps: true });
+
+const Hotel = mongoose.model('Hotel', hotelSchema);
+const Room = mongoose.model('Room', roomSchema);
+const Attendance = mongoose.model('Attendance', attendanceSchema);
+const Alert = mongoose.model('Alert', alertSchema);
+const Denied = mongoose.model('Denied', deniedSchema);
+const User = mongoose.model('User', userSchema);
+const Card = mongoose.model('Card', cardSchema);
+const Activity = mongoose.model('Activity', activitySchema);
+
+// Initialize Hotel Data (Run this once to populate the database)
+async function initializeHotels() {
+  const hotels = [
+    {
+      id: "1",
+      name: "Coastal Grand Hotel - Ooty",
+      location: "Ooty, Tamil Nadu",
+      address: "456 Hill Road, Ooty, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "rajesh.kumar@coastalgrand.com",
+      rating: 4.7,
+      description: "Scenic hill station hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "2 minutes ago",
+      manager: {
+        name: "Rajesh Kumar",
+        phone: "+91 90476 28844",
+        email: "rajesh.kumar@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "2",
+      name: "Coastal Grand Hotel - Salem",
+      location: "Salem, Tamil Nadu",
+      address: "123 Main Street, Salem, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "priya.devi@coastalgrand.com",
+      rating: 4.8,
+      description: "Premium hotel in the heart of Salem with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "5 minutes ago",
+      manager: {
+        name: "Priya Devi",
+        phone: "+91 90476 28844",
+        email: "priya.devi@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "3",
+      name: "Coastal Grand Hotel - Yercaud",
+      location: "Yercaud, Tamil Nadu",
+      address: "789 Mountain View, Yercaud, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "arun.balaji@coastalgrand.com",
+      rating: 4.6,
+      description: "Scenic hill station hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "10 minutes ago",
+      manager: {
+        name: "Arun Balaji",
+        phone: "+91 90476 28844",
+        email: "arun.balaji@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "4",
+      name: "Coastal Grand Hotel - Puducherry",
+      location: "Puducherry, Union Territory",
+      address: "321 Beach Road, Puducherry, Union Territory",
+      phone: "+91 90476 28844",
+      email: "lakshmi.priya@coastalgrand.com",
+      rating: 4.5,
+      description: "Heritage hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "maintenance",
+      lastActivity: "1 hour ago",
+      manager: {
+        name: "Lakshmi Priya",
+        phone: "+91 90476 28844",
+        email: "lakshmi.priya@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "5",
+      name: "Coastal Grand Hotel - Namakkal",
+      location: "Namakkal, Tamil Nadu",
+      address: "654 City Center, Namakkal, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "senthil.kumar@coastalgrand.com",
+      rating: 4.4,
+      description: "Premium hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "15 minutes ago",
+      manager: {
+        name: "Senthil Kumar",
+        phone: "+91 90476 28844",
+        email: "senthil.kumar@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "6",
+      name: "Coastal Grand Hotel - Chennai",
+      location: "Chennai, Tamil Nadu",
+      address: "987 Marina Beach Road, Chennai, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "vijay.anand@coastalgrand.com",
+      rating: 4.9,
+      description: "Metropolitan hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "30 minutes ago",
+      manager: {
+        name: "Vijay Anand",
+        phone: "+91 90476 28844",
+        email: "vijay.anand@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "7",
+      name: "Coastal Grand Hotel - Bangalore",
+      location: "Bangalore, Karnataka",
+      address: "147 MG Road, Bangalore, Karnataka",
+      phone: "+91 90476 28844",
+      email: "deepa.sharma@coastalgrand.com",
+      rating: 4.7,
+      description: "Metropolitan hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "45 minutes ago",
+      manager: {
+        name: "Deepa Sharma",
+        phone: "+91 90476 28844",
+        email: "deepa.sharma@coastalgrand.com",
+        status: "online",
+      },
+    },
+    {
+      id: "8",
+      name: "Coastal Grand Hotel - Kotagiri",
+      location: "Kotagiri, Tamil Nadu",
+      address: "258 Tea Estate Road, Kotagiri, Tamil Nadu",
+      phone: "+91 90476 28844",
+      email: "mohan.raj@coastalgrand.com",
+      rating: 4.6,
+      description: "Scenic hill station hotel with modern amenities and exceptional service.",
+      image: "/placeholder.jpg",
+      status: "active",
+      lastActivity: "1 hour ago",
+      manager: {
+        name: "Mohan Raj",
+        phone: "+91 90476 28844",
+        email: "mohan.raj@coastalgrand.com",
+        status: "online",
+      },
+    },
+  ];
+
+  for (const hotel of hotels) {
+    await Hotel.findOneAndUpdate({ id: hotel.id }, hotel, { upsert: true });
+  }
+  console.log("Hotels initialized");
+}
+
+// Initialize Room Data for all hotels
+async function initializeRooms() {
+  const hotels = await Hotel.find();
+  
+  for (const hotel of hotels) {
+    const hotelId = hotel.id;
+    const roomCount = getRoomCountForHotel(hotelId);
+    
+    // Generate realistic room numbers: 101-115 for floor 1, 201-215 for floor 2
+    const roomsPerFloor = Math.ceil(roomCount / 2); // Split rooms between 2 floors
+    let roomId = 1;
+    
+    // Floor 1: 101-115
+    for (let i = 101; i <= 100 + roomsPerFloor; i++) {
+      const roomData = {
+        hotelId: hotelId,
+        id: roomId,
+        number: i.toString(),
+        status: 'vacant',
+        hasMasterKey: false,
+        hasLowPower: false,
+        powerStatus: 'off',
+        occupantType: null,
+      };
+      
+      await Room.findOneAndUpdate(
+        { hotelId: hotelId, number: i.toString() },
+        roomData,
+        { upsert: true }
+      );
+      roomId++;
+    }
+    
+    // Floor 2: 201-215 (if needed)
+    if (roomCount > roomsPerFloor) {
+      const remainingRooms = roomCount - roomsPerFloor;
+      for (let i = 201; i <= 200 + remainingRooms; i++) {
+        const roomData = {
+          hotelId: hotelId,
+          id: roomId,
+          number: i.toString(),
+          status: 'vacant',
+          hasMasterKey: false,
+          hasLowPower: false,
+          powerStatus: 'off',
+          occupantType: null,
+        };
+        
+        await Room.findOneAndUpdate(
+          { hotelId: hotelId, number: i.toString() },
+          roomData,
+          { upsert: true }
+        );
+        roomId++;
+      }
+    }
+  }
+  console.log("Rooms initialized for all hotels");
+}
+
+// Get room count for each hotel
+function getRoomCountForHotel(hotelId) {
+  const roomCounts = {
+    "1": 25, // Ooty
+    "2": 30, // Salem
+    "3": 20, // Yercaud
+    "4": 28, // Puducherry
+    "5": 22, // Namakkal
+    "6": 30, // Chennai
+    "7": 30, // Bangalore
+    "8": 18, // Kotagiri
+  };
+  return roomCounts[hotelId] || 20;
+}
+
+mongoose.connection.once('open', () => {
+  initializeHotels();
+  initializeRooms();
+});
+
+// MQTT Broker
+const mqttPort = process.env.MQTT_PORT || 1883;
+server.listen(mqttPort, () => {
+  console.log(`MQTT broker listening on port ${mqttPort}`);
+});
+
+// Handle MQTT publishes from ESP32
+aedes.on('publish', async (packet, client) => {
+  if (packet.topic.startsWith('campus/room/')) {
+    try {
+      const data = JSON.parse(packet.payload.toString());
+      const [, , building, floor, roomNum, type] = packet.topic.split('/');
+      
+      // Validate MQTT data
+      if (!floor || !roomNum || !type) {
+        console.error('Invalid MQTT topic format:', packet.topic);
+        return;
+      }
+      
+      data.room = roomNum;
+      data.hotelId = floor; // Map floor to hotelId
+
+      let newActivity = null;
+
+      if (type === 'attendance') {
+        await new Attendance(data).save();
+        console.log(`Saved attendance for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+        // Update room status
+        let update = {};
+        let hasMasterKeyUpdate = {};
+        if (data.check_in) {
+          const status = data.role === 'Maintenance' ? 'maintenance' : 'occupied';
+          update = {
+            status,
+            occupantType: data.role.toLowerCase(),
+            powerStatus: 'on',
+          };
+          if (data.role === 'Manager') {
+            hasMasterKeyUpdate = { hasMasterKey: true };
+          }
+        } else {
+          update = {
+            status: 'vacant',
+            occupantType: null,
+            powerStatus: 'off',
+          };
+          if (data.role === 'Manager') {
+            hasMasterKeyUpdate = { hasMasterKey: false };
+          }
+        }
+        const fullUpdate = { ...update, ...hasMasterKeyUpdate };
+        const updatedRoom = await Room.findOneAndUpdate(
+          { hotelId: data.hotelId, number: roomNum },
+          fullUpdate,
+          { upsert: true, new: true }
+        );
+        broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
+
+        // Create activity
+        const activityType = data.check_in ? 'checkin' : 'checkout';
+        const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
+        const time = data.check_in || data.check_out;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: activityType,
+          action,
+          user: data.role,
+          time,
+        };
+      } else if (type === 'alerts') {
+        await new Alert(data).save();
+        console.log(`Saved alert for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+        // Create activity
+        const activityType = 'security';
+        const action = `Alert: ${data.alert_message} for ${data.role} in Room ${data.room}`;
+        const time = data.triggered_at;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: activityType,
+          action,
+          user: 'System',
+          time,
+        };
+      } else if (type === 'denied_access') {
+        await new Denied(data).save();
+        console.log(`Saved denied access for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+        // Create activity
+        const action = `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`;
+        const time = data.attempted_at;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: 'security',
+          action,
+          user: data.role,
+          time,
+        };
+      }
+
+      if (newActivity) {
+        const savedActivity = await new Activity(newActivity).save();
+        broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
+      }
+    } catch (err) {
+      console.error('Error processing MQTT message:', err);
+    }
+  }
+});
+
+// HTTP API Endpoints for Frontend
+app.get('/api/hotel/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const hotel = await Hotel.findOne({ id: req.params.hotelId });
+    if (!hotel) {
+      return res.status(404).json({ error: 'Hotel not found' });
+    }
+    const rooms = await Room.find({ hotelId: req.params.hotelId });
+    const totalRooms = rooms.length;
+    const activeRooms = rooms.filter((r) => r.status === 'occupied' || r.status === 'maintenance').length;
+    const occupancy = totalRooms ? Math.round((activeRooms / totalRooms) * 100) : 0;
+    res.json({ ...hotel.toObject(), totalRooms, activeRooms, occupancy });
+  } catch (error) {
+    console.error('Error fetching hotel:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.put('/api/hotel/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    await Hotel.findOneAndUpdate({ id: req.params.hotelId }, req.body, { upsert: true });
+    res.json({ message: 'Hotel updated successfully' });
+  } catch (error) {
+    console.error('Error updating hotel:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/hotels', async (req, res) => {
+  try {
+    const hotels = await Hotel.find();
+    const hotelsWithStats = await Promise.all(
+      hotels.map(async (hotel) => {
+        const rooms = await Room.find({ hotelId: hotel.id });
+        const totalRooms = rooms.length;
+        const activeRooms = rooms.filter((r) => r.status === 'occupied' || r.status === 'maintenance').length;
+        const occupancy = totalRooms ? Math.round((activeRooms / totalRooms) * 100) : 0;
+        return { ...hotel.toObject(), totalRooms, activeRooms, occupancy };
+      })
+    );
+    res.json(hotelsWithStats);
+  } catch (error) {
+    console.error('Error fetching hotels:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/rooms/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const rooms = await Room.find({ hotelId: req.params.hotelId }).sort({ number: 1 });
+    res.json(rooms);
+  } catch (error) {
+    console.error('Error fetching rooms:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/attendance/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await Attendance.find({ hotelId: req.params.hotelId }).sort({ createdAt: -1 });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching attendance:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/alerts/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await Alert.find({ hotelId: req.params.hotelId }).sort({ createdAt: -1 });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching alerts:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/denied_access/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await Denied.find({ hotelId: req.params.hotelId }).sort({ createdAt: -1 });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching denied access:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/users/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await User.find({ hotelId: req.params.hotelId });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/cards/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await Card.find({ hotelId: req.params.hotelId });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching cards:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/activity/:hotelId', validateHotelId, async (req, res) => {
+  try {
+    const data = await Activity.find({ hotelId: req.params.hotelId }).sort({ createdAt: -1 });
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching activity:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Mount Express app on HTTP server
+http.on('request', app);
+
+// WebSocket server for real-time updates
+const wss = new WebSocket.Server({ server: http });
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      console.log('Received WebSocket message:', data);
+    } catch (error) {
+      console.error('Error parsing WebSocket message:', error);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
+
+// Function to broadcast to all WebSocket clients
+function broadcastToClients(event, data) {
+  const message = JSON.stringify({ event, data });
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// Start HTTP/WebSocket Server
+const httpPort = process.env.HTTP_PORT || 3000;
+http.listen(httpPort, () => {
+  console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
+  console.log(`API endpoints available at http://localhost:${httpPort}/api`);
+  console.log(`WebSocket server available at ws://localhost:${httpPort}`);
+});

@@ -1,3 +1,4 @@
+
 const aedes = require('aedes')();
 const server = require('net').createServer(aedes.handle);
 const http = require('http').createServer();
@@ -5,19 +6,16 @@ const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const express = require('express');
 const app = express();
-
-// Load environment variables
 require('dotenv').config();
 
 // Middleware
 app.use(express.json());
 const cors = require('cors');
-const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000', 'http://localhost:3001'];
+const corsOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['https://rfid-frontend-vert.vercel.app'];
 app.use(cors({
   origin: corsOrigins,
   credentials: true
 }));
-// Request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -39,8 +37,6 @@ const checkDatabaseConnection = (req, res, next) => {
   }
   next();
 };
-
-// Apply middleware to all API routes
 app.use('/api', checkDatabaseConnection);
 
 // MongoDB Connection
@@ -75,7 +71,6 @@ const hotelSchema = new mongoose.Schema({
 
 const roomSchema = new mongoose.Schema({
   hotelId: String,
-  id: Number,
   number: String,
   status: String,
   hasMasterKey: Boolean,
@@ -92,6 +87,20 @@ const attendanceSchema = new mongoose.Schema({
   check_out: String,
   duration: Number,
   room: String,
+  building: String,
+  floorNumber: String,
+  timestamp: String,
+  isCheckedIn: Boolean,
+  deviceInfo: {
+    ssid: String,
+    mqttServer: String,
+    mqttPort: Number,
+    roomNumber: String,
+    building: String,
+    floorNumber: String,
+    ntpServer: String,
+    gmtOffset: Number
+  }
 }, { timestamps: true });
 
 const alertSchema = new mongoose.Schema({
@@ -101,6 +110,11 @@ const alertSchema = new mongoose.Schema({
   alert_message: String,
   triggered_at: String,
   room: String,
+  building: String,
+  floorNumber: String,
+  alertType: String,
+  severity: String,
+  resolved: Boolean,
 }, { timestamps: true });
 
 const deniedSchema = new mongoose.Schema({
@@ -110,6 +124,11 @@ const deniedSchema = new mongoose.Schema({
   denial_reason: String,
   attempted_at: String,
   room: String,
+  building: String,
+  floorNumber: String,
+  attemptCount: Number,
+  ipAddress: String,
+  deviceInfo: String,
 }, { timestamps: true });
 
 const userSchema = new mongoose.Schema({
@@ -131,6 +150,43 @@ const cardSchema = new mongoose.Schema({
   status: String,
   expiryDate: String,
   lastUsed: String,
+  card_uid: String,
+  role: String,
+  building: String,
+  floorNumber: String,
+  isActive: Boolean,
+  batteryLevel: Number,
+  accessCount: Number,
+}, { timestamps: true });
+
+const deviceSchema = new mongoose.Schema({
+  deviceId: String,
+  hotelId: String,
+  room: String,
+  building: String,
+  floorNumber: String,
+  ssid: String,
+  mqttServer: String,
+  mqttPort: Number,
+  lastSeen: Date,
+  firmwareVersion: String,
+  uptime: Number,
+  freeHeap: Number,
+  wifiSignal: Number,
+  isOnline: Boolean,
+}, { timestamps: true });
+
+const presenceSchema = new mongoose.Schema({
+  hotelId: String,
+  card_uid: String,
+  room: String,
+  building: String,
+  floorNumber: String,
+  isPresent: Boolean,
+  lastDetected: Date,
+  presenceDuration: Number,
+  cardAbsentCount: Number,
+  deviceId: String,
 }, { timestamps: true });
 
 const activitySchema = new mongoose.Schema({
@@ -149,6 +205,8 @@ const Alert = mongoose.model('Alert', alertSchema);
 const Denied = mongoose.model('Denied', deniedSchema);
 const User = mongoose.model('User', userSchema);
 const Card = mongoose.model('Card', cardSchema);
+const Device = mongoose.model('Device', deviceSchema);
+const Presence = mongoose.model('Presence', presenceSchema);
 const Activity = mongoose.model('Activity', activitySchema);
 
 // Initialize Hotel Data
@@ -322,15 +380,12 @@ async function initializeRooms() {
     const hotelId = hotel.id;
     const roomCount = getRoomCountForHotel(hotelId);
     
-    // Generate realistic room numbers: 101-115 for floor 1, 201-215 for floor 2
     const roomsPerFloor = Math.ceil(roomCount / 2);
     let roomId = 1;
     
-    // Floor 1: 101-115
     for (let i = 101; i <= 100 + roomsPerFloor; i++) {
       const roomData = {
         hotelId: hotelId,
-        id: roomId,
         number: i.toString(),
         status: 'vacant',
         hasMasterKey: false,
@@ -347,13 +402,11 @@ async function initializeRooms() {
       roomId++;
     }
     
-    // Floor 2: 201-215 (if needed)
     if (roomCount > roomsPerFloor) {
       const remainingRooms = roomCount - roomsPerFloor;
       for (let i = 201; i <= 200 + remainingRooms; i++) {
         const roomData = {
           hotelId: hotelId,
-          id: roomId,
           number: i.toString(),
           status: 'vacant',
           hasMasterKey: false,
@@ -374,7 +427,6 @@ async function initializeRooms() {
   console.log("Rooms initialized for all hotels");
 }
 
-// Get room count for each hotel
 function getRoomCountForHotel(hotelId) {
   const roomCounts = {
     "1": 25, // Ooty
@@ -394,36 +446,273 @@ mongoose.connection.once('open', () => {
   initializeRooms();
 });
 
-// MQTT Broker - Only enable in local/dev (not on Vercel/serverless)
-if (process.env.NODE_ENV !== 'production') {
+// MQTT Client (External Broker for Production/Render)
+const mqtt = require('mqtt');
+const mqttBrokerUrl = process.env.MQTT_BROKER_URL || 'mqtt://broker.hivemq.com:1883';
+const mqttClient = mqtt.connect(mqttBrokerUrl, {
+  reconnectPeriod: 1000, // Reconnect every 1 second if disconnected
+});
+
+mqttClient.on('connect', () => {
+  console.log(`Connected to MQTT broker: ${mqttBrokerUrl}`);
+  mqttClient.subscribe('campus/room/+/+/+/+', (err) => {
+    if (err) {
+      console.error('MQTT subscription error:', err);
+    } else {
+      console.log('Subscribed to campus/room/+/+/+/+');
+    }
+  });
+});
+
+mqttClient.on('close', () => {
+  console.log('Disconnected from MQTT broker, attempting to reconnect...');
+});
+
+mqttClient.on('error', (err) => {
+  console.error('MQTT connection error:', err);
+});
+
+mqttClient.on('message', async (topic, message) => {
+  if (topic.startsWith('campus/room/')) {
+    try {
+      const data = JSON.parse(message.toString());
+      const [, , building, floor, roomNum, type] = topic.split('/');
+      
+      if (!floor || !roomNum || !type) {
+        console.error('Invalid MQTT topic format:', topic);
+        return;
+      }
+      
+      data.room = roomNum;
+      data.hotelId = floor; // Map floor to hotelId
+      data.building = building;
+      data.floorNumber = floor;
+      data.timestamp = new Date().toISOString();
+
+      let newActivity = null;
+
+      if (type === 'attendances') {
+        const attendanceData = {
+          ...data,
+          card_uid: data.card_uid,
+          role: data.role,
+          check_in: data.check_in,
+          check_out: data.check_out,
+          duration: data.duration,
+          isCheckedIn: data.check_in ? true : false,
+          deviceInfo: {
+            ssid: data.ssid || 'unknown',
+            mqttServer: data.mqttServer || 'broker.hivemq.com',
+            mqttPort: data.mqttPort || 1883,
+            roomNumber: data.room,
+            building: data.building,
+            floorNumber: data.floorNumber,
+            ntpServer: data.ntpServer || 'pool.ntp.org',
+            gmtOffset: data.gmtOffset_sec || 19800
+          }
+        };
+        
+        await new Attendance(attendanceData).save();
+        console.log(`Saved MQTT attendance for room ${roomNum} in hotel ${data.hotelId}:`, attendanceData);
+
+        // Save device info
+        const deviceData = {
+          deviceId: data.deviceId || `ESP32_${roomNum}`,
+          hotelId: data.hotelId,
+          room: roomNum,
+          building: data.building,
+          floorNumber: data.floorNumber,
+          ssid: data.ssid || 'unknown',
+          mqttServer: data.mqttServer || 'broker.hivemq.com',
+          mqttPort: data.mqttPort || 1883,
+          lastSeen: new Date(),
+          firmwareVersion: data.firmwareVersion || 'unknown',
+          uptime: data.uptime || 0,
+          freeHeap: data.freeHeap || 0,
+          wifiSignal: data.wifiSignal || 0,
+          isOnline: true
+        };
+        await Device.findOneAndUpdate(
+          { deviceId: deviceData.deviceId },
+          deviceData,
+          { upsert: true }
+        );
+
+        // Save presence info
+        const presenceData = {
+          hotelId: data.hotelId,
+          card_uid: data.card_uid,
+          room: roomNum,
+          building: data.building,
+          floorNumber: data.floorNumber,
+          isPresent: data.check_in ? true : false,
+          lastDetected: new Date(),
+          presenceDuration: data.duration || 0,
+          cardAbsentCount: data.cardAbsentCount || 0,
+          deviceId: deviceData.deviceId
+        };
+        await Presence.findOneAndUpdate(
+          { hotelId: data.hotelId, card_uid: data.card_uid, room: roomNum },
+          presenceData,
+          { upsert: true }
+        );
+
+        let update = {};
+        let hasMasterKeyUpdate = {};
+        if (data.check_in) {
+          const status = data.role === 'Maintenance' ? 'maintenance' : 'occupied';
+          update = {
+            status,
+            occupantType: data.role.toLowerCase(),
+            powerStatus: 'on',
+          };
+          if (data.role === 'Manager') {
+            hasMasterKeyUpdate = { hasMasterKey: true };
+          }
+        } else {
+          update = {
+            status: 'vacant',
+            occupantType: null,
+            powerStatus: 'off',
+          };
+          if (data.role === 'Manager') {
+            hasMasterKeyUpdate = { hasMasterKey: false };
+          }
+        }
+        const fullUpdate = { ...update, ...hasMasterKeyUpdate };
+        const updatedRoom = await Room.findOneAndUpdate(
+          { hotelId: data.hotelId, number: roomNum },
+          fullUpdate,
+          { upsert: true, new: true }
+        );
+        broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
+
+        const activityType = data.check_in ? 'checkin' : 'checkout';
+        const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
+        const time = data.check_in || data.check_out;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: activityType,
+          action,
+          user: data.role,
+          time,
+        };
+      } else if (type === 'denied_access') {
+        await new Denied(data).save();
+        console.log(`Saved denied access for room ${roomNum} in hotel ${data.hotelId}:`, data);
+
+        const action = `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`;
+        const time = data.attempted_at;
+        newActivity = {
+          hotelId: data.hotelId,
+          id: new Date().getTime().toString(),
+          type: 'security',
+          action,
+          user: data.role,
+          time,
+        };
+      }
+
+      if (newActivity) {
+        const savedActivity = await new Activity(newActivity).save();
+        broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
+      }
+    } catch (err) {
+      console.error('Error processing MQTT message:', err);
+    }
+  }
+});
+
+// Local MQTT Broker (Development Only)
+if (process.env.NODE_ENV === 'development') {
   const mqttPort = process.env.MQTT_PORT || 1883;
   server.listen(mqttPort, () => {
-    console.log(`MQTT broker listening on port ${mqttPort}`);
+    console.log(`Local MQTT broker listening on port ${mqttPort}`);
   });
 
-  // Handle MQTT publishes from ESP32
   aedes.on('publish', async (packet, client) => {
     if (packet.topic.startsWith('campus/room/')) {
       try {
         const data = JSON.parse(packet.payload.toString());
         const [, , building, floor, roomNum, type] = packet.topic.split('/');
         
-        // Validate MQTT data
         if (!floor || !roomNum || !type) {
           console.error('Invalid MQTT topic format:', packet.topic);
           return;
         }
         
         data.room = roomNum;
-        data.hotelId = floor; // Map floor to hotelId
+        data.hotelId = floor;
+        data.building = building;
+        data.floorNumber = floor;
 
         let newActivity = null;
 
-        if (type === 'attendance') {
-          await new Attendance(data).save();
-          console.log(`Saved attendance for room ${roomNum} in hotel ${data.hotelId}:`, data);
+        if (type === 'attendances') {
+          const attendanceData = {
+            ...data,
+            card_uid: data.card_uid,
+            role: data.role,
+            check_in: data.check_in,
+            check_out: data.check_out,
+            duration: data.duration,
+            isCheckedIn: data.check_in ? true : false,
+            deviceInfo: {
+              ssid: data.ssid || 'unknown',
+              mqttServer: data.mqttServer || 'localhost',
+              mqttPort: data.mqttPort || 1883,
+              roomNumber: data.room,
+              building: data.building,
+              floorNumber: data.floorNumber,
+              ntpServer: data.ntpServer || 'pool.ntp.org',
+              gmtOffset: data.gmtOffset_sec || 19800
+            }
+          };
+          
+          await new Attendance(attendanceData).save();
+          console.log(`Saved local MQTT attendance for room ${roomNum} in hotel ${data.hotelId}:`, attendanceData);
 
-          // Update room status
+          const deviceData = {
+            deviceId: data.deviceId || `ESP32_${roomNum}`,
+            hotelId: data.hotelId,
+            room: roomNum,
+            building: data.building,
+            floorNumber: data.floorNumber,
+            ssid: data.ssid || 'unknown',
+            mqttServer: data.mqttServer || 'localhost',
+            mqttPort: data.mqttPort || 1883,
+            lastSeen: new Date(),
+            firmwareVersion: data.firmwareVersion || 'unknown',
+            uptime: data.uptime || 0,
+            freeHeap: data.freeHeap || 0,
+            wifiSignal: data.wifiSignal || 0,
+            isOnline: true
+          };
+          await Device.findOneAndUpdate(
+            { deviceId: deviceData.deviceId },
+            deviceData,
+            { upsert: true }
+          );
+
+          const presenceData = {
+            hotelId: data.hotelId,
+            card_uid: data.card_uid,
+            room: roomNum,
+            building: data.building,
+            floorNumber: data.floorNumber,
+            isPresent: data.check_in ? true : false,
+            lastDetected: new Date(),
+            presenceDuration: data.duration || 0,
+            cardAbsentCount: data.cardAbsentCount || 0,
+            deviceId: deviceData.deviceId
+          };
+          await Presence.findOneAndUpdate(
+            { hotelId: data.hotelId, card_uid: data.card_uid, room: roomNum },
+            presenceData,
+            { upsert: true }
+          );
+
           let update = {};
           let hasMasterKeyUpdate = {};
           if (data.check_in) {
@@ -454,7 +743,6 @@ if (process.env.NODE_ENV !== 'production') {
           );
           broadcastToClients(`roomUpdate:${data.hotelId}`, { roomNum, ...fullUpdate });
 
-          // Create activity
           const activityType = data.check_in ? 'checkin' : 'checkout';
           const action = `${data.role} checked ${data.check_in ? 'in' : 'out'} to Room ${data.room}`;
           const time = data.check_in || data.check_out;
@@ -466,27 +754,10 @@ if (process.env.NODE_ENV !== 'production') {
             user: data.role,
             time,
           };
-        } else if (type === 'alerts') {
-          await new Alert(data).save();
-          console.log(`Saved alert for room ${roomNum} in hotel ${data.hotelId}:`, data);
-
-          // Create activity
-          const activityType = 'security';
-          const action = `Alert: ${data.alert_message} for ${data.role} in Room ${data.room}`;
-          const time = data.triggered_at;
-          newActivity = {
-            hotelId: data.hotelId,
-            id: new Date().getTime().toString(),
-            type: activityType,
-            action,
-            user: 'System',
-            time,
-          };
         } else if (type === 'denied_access') {
           await new Denied(data).save();
           console.log(`Saved denied access for room ${roomNum} in hotel ${data.hotelId}:`, data);
 
-          // Create activity
           const action = `Denied access to ${data.role}: ${data.denial_reason} for Room ${data.room}`;
           const time = data.attempted_at;
           newActivity = {
@@ -504,7 +775,7 @@ if (process.env.NODE_ENV !== 'production') {
           broadcastToClients(`activityUpdate:${data.hotelId}`, savedActivity);
         }
       } catch (err) {
-        console.error('Error processing MQTT message:', err);
+        console.error('Error processing local MQTT message:', err);
       }
     }
   });
@@ -654,7 +925,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Function to broadcast to all WebSocket clients
 function broadcastToClients(event, data) {
   const message = JSON.stringify({ event, data });
   wss.clients.forEach((client) => {
@@ -664,16 +934,10 @@ function broadcastToClients(event, data) {
   });
 }
 
-// Vercel serverless handler (required for Vercel deployment)
-if (typeof process !== 'undefined' && process.env.VERCEL) {
-  const handler = http.createServer(app);
-  module.exports = handler;
-} else {
-  // Start HTTP/WebSocket Server (local/dev)
-  const httpPort = process.env.HTTP_PORT || 3000;
-  http.listen(httpPort, () => {
-    console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
-    console.log(`API endpoints available at http://localhost:${httpPort}/api`);
-    console.log(`WebSocket server available at ws://localhost:${httpPort}`);
-  });
-}
+// Start HTTP/WebSocket Server
+const httpPort = process.env.HTTP_PORT || 3000;
+http.listen(httpPort, () => {
+  console.log(`HTTP/WebSocket server listening on port ${httpPort}`);
+  console.log(`API endpoints available at http://localhost:${httpPort}/api`);
+  console.log(`WebSocket server available at ws://localhost:${httpPort} (use wss://rfid-backend-odtg.onrender.com for Render)`);
+});
